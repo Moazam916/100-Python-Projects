@@ -40,7 +40,7 @@ while game_over=="y":
         print(f"Your cards: {your_cards}, current score is: {sum(your_cards)}")
         print(f"Computer's first card: {computer_cards[0]}")
         while user_input == "y":
-            user_input = str(input("Type 'y' to get another card, type 'n' to pass"))
+            user_input = str(input("Type 'y' to get another card, type 'n' to pass: "))
             if user_input == "y":
                 your_cards.append(random.choice(cards))
                 print(f"your cards: {your_cards}, final score is: {sum(your_cards)}")
@@ -56,10 +56,10 @@ while game_over=="y":
                 # elif sum(your_cards) > sum(computer_cards):
                 #     print("you win")
                 # else:
-                #     print("you loose")
+                #     print("you lose")
             else:
                 print(f"you cards: {your_cards}, final score is: {sum(your_cards)}")
-                print(f"computer crads:{computer_cards}, computer's final score is: {sum(computer_cards)}")
+                print(f"computer cards:{computer_cards}, computer's final score is: {sum(computer_cards)}")
                 user_input = "n"
                 if sum(your_cards) == sum(computer_cards):
                     print("its draw")
