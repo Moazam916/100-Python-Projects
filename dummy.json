@@ -1,0 +1,19 @@
+{
+    "environment": "dev",
+    "lambdaFunctionName": "my-lambda-dev",
+    "iamRole": "arn:aws:iam::123456789012:role/lambda-dev-role",
+    "securityGroupIds": [
+        "sg-01234abcd5678efgh"
+    ],
+    "subnetIds": [
+        "subnet-abc12345",
+        "subnet-def67890"
+    ],
+    "memorySize": 128,
+    "timeout": 10,
+    "environmentVariables": {
+        "LOG_LEVEL": "DEBUG",
+        "DB_HOST": "dev-db.mycompany.com",
+        "API_ENDPOINT": "https://api-dev.mycompany.com"
+    }
+}
