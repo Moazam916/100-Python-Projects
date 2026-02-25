@@ -1,0 +1,3 @@
+customer_id,order_date,amount,status
+123,2026-02-20,49.99,shipped
+456,2026-02-19,19.95,pending
