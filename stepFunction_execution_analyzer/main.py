@@ -66,6 +66,13 @@ def _scan_failed_executions(
     * ``name`` - execution name assigned when started
     * ``rule_key`` - value pulled from the execution input, if available
     * ``cause`` - failure reason text from ``describe_execution``
+    * ``task_failures`` - list of dictionaries describing individual
+      errors discovered in the execution history.  Each entry has ``state``,
+      ``error`` and ``cause`` fields and helps surface the underlying
+      Lambda/Glue/Activity/other component-level error that triggered the
+      failure.  Only events that indicate a failure (those with a
+      ``*FailedEventDetails`` payload) are returned; all successful or
+      unrelated history events are ignored.
     """
 
     import time
@@ -73,6 +80,57 @@ def _scan_failed_executions(
     sfn = boto3.client("stepfunctions")
     paginator = sfn.get_paginator("list_executions")
     results: list[Dict[str, Any]] = []
+
+    def _parse_history(execution_arn: str) -> list[Dict[str, str]]:
+        """Pull failure details out of the execution history.
+
+        We ask Step Functions for the history up to 1000 events and look for
+        the kinds of events that indicate a task failed.  The structure of
+        the returned event object varies slightly depending on the service
+        that failed (``TaskFailed`` is generic, ``LambdaFunctionFailed`` is
+        returned for lambda integrations, etc.) but both expose ``error`` and
+        ``cause`` fields.  We also attempt to capture the name of the state
+        so that callers can easily identify which component failed.
+
+        The return value is a list of dictionaries with keys ``state``,
+        ``error`` and ``cause``.  If there is any issue fetching the history
+        (e.g. permissions) we log the exception and return an empty list so
+        that the rest of the scanning still succeeds.
+        """
+
+        try:
+            history_resp = sfn.get_execution_history(
+                executionArn=execution_arn, maxResults=1000
+            )
+        except ClientError:  # pragma: no cover - external dependency
+            logger.exception("unable to fetch execution history for %s", execution_arn)
+            return []
+
+        failures: list[Dict[str, str]] = []
+        for ev in history_resp.get("events", []):
+            # look for any event that indicates a failure; the exact type
+            # varies (TaskFailed, LambdaFunctionFailed, ActivityFailed, etc)
+            # but they all embed an ``*FailedEventDetails`` object containing
+            # error/cause.  We also grab the name of the state if available so
+            # callers can identify which step failed.
+            details = None
+            for key, val in ev.items():
+                if key.endswith("FailedEventDetails"):
+                    details = val
+                    break
+
+            if not details:
+                continue
+
+            state = ev.get("stateEnteredEventDetails", {}).get("name")
+            failures.append(
+                {
+                    "state": state,
+                    "error": details.get("error"),
+                    "cause": details.get("cause"),
+                }
+            )
+        return failures
 
     for page in paginator.paginate(
         stateMachineArn=state_machine_arn, statusFilter="FAILED"
@@ -89,12 +147,15 @@ def _scan_failed_executions(
             desc = sfn.describe_execution(executionArn=arn)
             rule_key = _extract_rule_key_from_input(desc.get("input", ""))
             cause = desc.get("cause")
+            # also include any task-specific failures found in history
+            history_failures = _parse_history(arn)
             results.append(
                 {
                     "executionArn": arn,
                     "name": name,
                     "rule_key": rule_key,
                     "cause": cause,
+                    "task_failures": history_failures,
                 }
             )
     return results

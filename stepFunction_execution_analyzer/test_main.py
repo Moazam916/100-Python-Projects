@@ -40,6 +40,12 @@ def test_scan_failed_executions_single_page(stub_sfn):
         "cause": "something broke",
     }
     stub_sfn.add_response("describe_execution", describe_resp, {"executionArn": "arn:exec:1"})
+    # history call returns nothing
+    stub_sfn.add_response(
+        "get_execution_history",
+        {"events": []},
+        {"executionArn": "arn:exec:1", "maxResults": 1000},
+    )
     stub_sfn.activate()
 
     result = main._scan_failed_executions(arn)
@@ -49,6 +55,7 @@ def test_scan_failed_executions_single_page(stub_sfn):
             "name": "run1",
             "rule_key": "myrule",
             "cause": "something broke",
+            "task_failures": [],
         }
     ]
 
@@ -91,11 +98,22 @@ def test_time_filtering(stub_sfn, monkeypatch):
             },
             {"executionArn": arn_val},
         )
+        stub_sfn.add_response(
+            "get_execution_history",
+            {"events": []},
+            {"executionArn": arn_val, "maxResults": 1000},
+        )
     stub_sfn.activate()
 
     ret = main.lambda_handler({}, None)
     assert ret["failed_executions"] == [
-        {"executionArn": "arn:exec:new", "name": "new", "rule_key": None, "cause": "x"}
+        {
+            "executionArn": "arn:exec:new",
+            "name": "new",
+            "rule_key": None,
+            "cause": "x",
+            "task_failures": [],
+        }
     ]
 
 
@@ -117,6 +135,11 @@ def test_lambda_handler_success(stub_sfn, monkeypatch):
         "cause": "oops",
     }
     stub_sfn.add_response("describe_execution", describe_resp, {"executionArn": "arn:exec:A"})
+    stub_sfn.add_response(
+        "get_execution_history",
+        {"events": []},
+        {"executionArn": "arn:exec:A", "maxResults": 1000},
+    )
     stub_sfn.activate()
 
     ret = main.lambda_handler({}, None)
@@ -127,6 +150,104 @@ def test_lambda_handler_success(stub_sfn, monkeypatch):
                 "name": "runA",
                 "rule_key": "xyz",
                 "cause": "oops",
+                "task_failures": [],
             }
         ]
     }
+
+
+def test_history_parsing(stub_sfn):
+    """Ensure that errors from task failures are returned to the caller."""
+    arn = "arn:aws:states:us-east-1:123:stateMachine:foo"
+    list_resp = {"executions": [{"name": "runX", "executionArn": "arn:exec:X", "startDate": "ignored"}]}
+    stub_sfn.add_response("list_executions", list_resp, {"stateMachineArn": arn, "statusFilter": "FAILED"})
+    describe_resp = {
+        "executionArn": "arn:exec:X",
+        "input": json.dumps({}),
+        "status": "FAILED",
+        "cause": "top-level",
+    }
+    stub_sfn.add_response("describe_execution", describe_resp, {"executionArn": "arn:exec:X"})
+    # provide a fake history with a couple of events: one failure and one
+    # unrelated event to ensure filtering works
+    history_resp = {
+        "events": [
+            {
+                "type": "TaskFailed",
+                "stateEnteredEventDetails": {"name": "DoStuff"},
+                "taskFailedEventDetails": {"error": "GlueJobError", "cause": "Job xyz failed"},
+            },
+            {
+                "type": "TaskSucceeded",
+                "stateEnteredEventDetails": {"name": "Other"},
+            },
+        ]
+    }
+    stub_sfn.add_response(
+        "get_execution_history",
+        history_resp,
+        {"executionArn": "arn:exec:X", "maxResults": 1000},
+    )
+    stub_sfn.activate()
+
+    result = main._scan_failed_executions(arn)
+    assert result == [
+        {
+            "executionArn": "arn:exec:X",
+            "name": "runX",
+            "rule_key": None,
+            "cause": "top-level",
+            "task_failures": [
+                {"state": "DoStuff", "error": "GlueJobError", "cause": "Job xyz failed"}
+            ],
+        }
+    ]
+
+
+def test_history_parsing_lambda_and_activity(stub_sfn):
+    """Different failure event types should all be captured by the parser."""
+    arn = "arn:aws:states:us-east-1:123:stateMachine:foo"
+    list_resp = {"executions": [{"name": "runY", "executionArn": "arn:exec:Y", "startDate": "ignored"}]}
+    stub_sfn.add_response("list_executions", list_resp, {"stateMachineArn": arn, "statusFilter": "FAILED"})
+    describe_resp = {
+        "executionArn": "arn:exec:Y",
+        "input": json.dumps({}),
+        "status": "FAILED",
+        "cause": "another top",
+    }
+    stub_sfn.add_response("describe_execution", describe_resp, {"executionArn": "arn:exec:Y"})
+    # simulate a LambdaFunctionFailed and ActivityFailed event
+    history_resp = {
+        "events": [
+            {
+                "type": "LambdaFunctionFailed",
+                "stateEnteredEventDetails": {"name": "CallLambda"},
+                "lambdaFunctionFailedEventDetails": {"error": "LambdaError", "cause": "Exception in handler"},
+            },
+            {
+                "type": "ActivityFailed",
+                "stateEnteredEventDetails": {"name": "DoActivity"},
+                "activityFailedEventDetails": {"error": "ActivityError", "cause": "something went wrong"},
+            },
+        ]
+    }
+    stub_sfn.add_response(
+        "get_execution_history",
+        history_resp,
+        {"executionArn": "arn:exec:Y", "maxResults": 1000},
+    )
+    stub_sfn.activate()
+
+    result = main._scan_failed_executions(arn)
+    assert result == [
+        {
+            "executionArn": "arn:exec:Y",
+            "name": "runY",
+            "rule_key": None,
+            "cause": "another top",
+            "task_failures": [
+                {"state": "CallLambda", "error": "LambdaError", "cause": "Exception in handler"},
+                {"state": "DoActivity", "error": "ActivityError", "cause": "something went wrong"},
+            ],
+        }
+    ]
